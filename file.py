@@ -2,7 +2,7 @@ import streamlit as st
 import graphviz
 from collections import deque, defaultdict
 import string
-
+import pandas as pd
 class State:
     def __init__(self, name):
         self.name = name
@@ -38,6 +38,14 @@ class NFA:
                     closure.add(state)
                     queue.append(state)
         return frozenset(closure)
+    def accepts(self, word):
+        current_states = self.epsilon_closure({self.start_state})
+        for symbol in word:
+            if symbol not in self.alphabet:
+                return False
+            current_states = self.epsilon_closure(self.move(current_states, symbol))
+        return any(self.states[state].is_final for state in current_states)
+
 
     def move(self, states, symbol):
         result = set()
@@ -101,6 +109,69 @@ class DFA:
         if name not in self.states:
             self.states[name] = State(name)
         return self.states[name]
+    def accepts(self, word):
+        current_state = self.start_state
+        for symbol in word:
+            if symbol not in self.alphabet:
+                return False
+            current_state = self.states[current_state].transitions.get(symbol)
+            if current_state is None:
+                return False
+        return self.states[current_state].is_final
+    def minimize(self):
+        # Étapes : partition initiale
+        final_states = {s for s in self.states if self.states[s].is_final}
+        non_final_states = set(self.states.keys()) - final_states
+        partitions = [final_states, non_final_states]
+
+        def get_partition(state):
+            for i, group in enumerate(partitions):
+                if state in group:
+                    return i
+            return None
+
+        changed = True
+        while changed:
+            changed = False
+            new_partitions = []
+            for group in partitions:
+                grouped = {}
+                for state in group:
+                    key = tuple(
+                        (symbol, get_partition(self.states[state].transitions[symbol]) 
+                        if symbol in self.states[state].transitions else None)
+                        for symbol in self.alphabet
+                    )
+                    grouped.setdefault(key, set()).add(state)
+                new_partitions.extend(grouped.values())
+                if len(grouped) > 1:
+                    changed = True
+            partitions = new_partitions
+
+        # Créer le nouvel AFD
+        new_dfa = DFA()
+        representative = {}
+        
+        for i, group in enumerate(partitions):
+            name =f"M{i}"
+            
+            for state in group:
+                representative[state] = name
+            new_dfa.add_state( name)
+            new_dfa.state_compositions[ name] = frozenset().union(*(set(self.state_compositions[s]) for s in group))
+
+            if any(self.states[s].is_final for s in group):
+                new_dfa.states[ name].is_final = True
+
+        new_dfa.start_state = representative[self.start_state]
+
+        for state in self.states:
+            from_state = representative[state]
+            for symbol, target in self.states[state].transitions.items():
+                to_state = representative[target]
+                new_dfa.add_transition(from_state, to_state, symbol)
+
+        return new_dfa
 
     def add_transition(self, from_state, to_state, symbol):
         self.states[from_state].transitions[symbol] = to_state
@@ -113,20 +184,11 @@ def visualize_automaton(automaton, title):
     # Configuration des nœuds
     graph.attr('node', shape='circle', width='0.6', height='0.6')
     
-    # Pour DFA, on utilise juste les lettres
-    if isinstance(automaton, DFA):
-        for state_id, state in automaton.states.items():
-            if state.is_final:
-                graph.node(state_id, shape='doublecircle')
-            else:
-                graph.node(state_id)
-    else:
-        # Pour NFA, on garde les noms originaux
-        for state_name, state in automaton.states.items():
-            if state.is_final:
-                graph.node(state_name, shape='doublecircle')
-            else:
-                graph.node(state_name)
+    for state_key, state in automaton.states.items():
+        if state.is_final:
+            graph.node(state_key, shape='doublecircle')
+        else:
+            graph.node(state_key)
     
     # Flèche de départ
     graph.node('start', shape='none', label='')
@@ -134,13 +196,26 @@ def visualize_automaton(automaton, title):
     
     # Transitions
     for state_name, state in automaton.states.items():
+        edges = {}
         for symbol, targets in state.transitions.items():
-            if isinstance(automaton, DFA):
-                graph.edge(state_name, targets, label=symbol)
+           
+            if  isinstance(automaton, DFA):
+            
+                target = targets
+              
+                edges.setdefault(target, []).append(symbol)
             else:
-                for target in targets:
-                    graph.edge(state_name, target, label=symbol)
-    
+                if isinstance(targets, str):
+                    edges.setdefault(targets, []).append(symbol)
+                else:
+
+                    for target in targets:
+                      
+                        edges.setdefault(target, []).append(symbol)
+
+        for target, symbols in edges.items():
+            
+            graph.edge(state_name, target, label=", ".join(sorted(symbols)))
     st.graphviz_chart(graph, use_container_width=True)
 def regex_to_postfix(regex):
     precedence = {'*': 4, '+': 4, '?': 4, '.': 3, '|': 2}
@@ -329,7 +404,7 @@ def main():
     st.title("Projet Module IA2 - Automates Finis")
     st.subheader("Construction et déterminisation d'ε-NFA")
     
-    tab1, tab2 = st.tabs(["Construction ε-NFA", "Déterminisation en AFD"])
+    tab1, tab2,tab3 = st.tabs(["Construction ε-NFA", "Déterminisation en AFD", "Test de mots"])
     
     with tab1:
         st.header("Construction d'un ε-NFA")
@@ -386,18 +461,23 @@ def main():
                     
                     # Display transition table
                     st.subheader("Table de transitions ε-NFA")
-                    trans_table = []
+                    table_data = {}
+
                     for state in states:
+                        row = {}
                         for symbol in alphabet:
-                            if symbol in nfa.states[state].transitions:
-                                trans_table.append({
-                                    "État": state,
-                                    "Symbole": symbol,
-                                    "Vers": ', '.join(nfa.states[state].transitions[symbol])
-                                })
-                    
-                    st.table(trans_table)
-        
+                            targets = nfa.states[state].transitions.get(symbol, [])
+                            row[symbol] = ', '.join(targets) if targets else "∅"
+                        table_data[state] = row
+
+                    # Créer un DataFrame : les lignes = états, colonnes = alphabet
+                    df = pd.DataFrame.from_dict(table_data, orient='index')
+                    df.index.name = "Q \\ Σ"
+                    df.reset_index(inplace=True)
+
+                    # Afficher dans Streamlit
+                    st.table(df)
+                            
         else:  # Construction depuis expression régulière
             st.subheader("Construction depuis une expression régulière")
             regex = st.text_input("Entrez une expression régulière (ex: a(b|c)*)", "a(b|c)*")
@@ -421,22 +501,34 @@ def main():
 
                     # Affichage de la table des transitions
                     st.subheader("Table de transitions ε-NFA")
-                    trans_table = []
-                    for state_name, state in compat_nfa.states.items():
-                        for symbol in sorted(state.transitions.keys()):
-                            trans_table.append({
-                                "État": state_name,
-                                "Symbole": symbol,
-                                "Vers": ', '.join(state.transitions[symbol])
-                            })
+                   # Rassembler tous les symboles (y compris ε s'il existe)
+                    all_symbols = set()
+                    for state in compat_nfa.states.values():
+                        all_symbols.update(state.transitions.keys())
                         if state.epsilon_transitions:
-                            trans_table.append({
-                                "État": state_name,
-                                "Symbole": 'ε',
-                                "Vers": ', '.join(state.epsilon_transitions)
-                            })
+                            all_symbols.add('ε')
+                    alphabet = sorted(all_symbols)
 
-                    st.table(trans_table)
+                    # Construction du tableau
+                    table_data = {}
+
+                    for state_name, state in compat_nfa.states.items():
+                        row = {}
+                        for symbol in alphabet:
+                            if symbol == 'ε':
+                                targets = state.epsilon_transitions
+                            else:
+                                targets = state.transitions.get(symbol, [])
+                            row[symbol] = ', '.join(targets) if targets else "∅"
+                        table_data[state_name] = row
+
+                    # Création du DataFrame
+                    df = pd.DataFrame.from_dict(table_data, orient='index')
+                    df.index.name = "Q \\ Σ"
+                    df.reset_index(inplace=True)
+
+                    # Affichage dans Streamlit
+                    st.table(df)
                     
                 except Exception as e:
                     st.error(f"Erreur dans la construction: {str(e)}")
@@ -450,7 +542,7 @@ def main():
             nfa = st.session_state.nfa
             
             if st.button("Convertir en AFD"):
-                dfa = nfa.to_dfa()
+                dfa:DFA = nfa.to_dfa()
                 st.session_state.dfa = dfa
                 st.success("AFD généré avec succès!")
                 
@@ -458,21 +550,26 @@ def main():
                 visualize_automaton(dfa, "AFD")
                 
                 # Display DFA transition table
-                st.subheader("Table de transitions AFD")
-                trans_table = []
+                rows = []
+                index_labels = []
+
                 for from_state, state in dfa.states.items():
                     from_comp = ",".join(sorted(dfa.state_compositions[from_state]))
+                    row = {}
                     for symbol in dfa.alphabet:
                         if symbol in state.transitions:
                             to_state = state.transitions[symbol]
                             to_comp = ",".join(sorted(dfa.state_compositions[to_state]))
-                            trans_table.append({
-                                "État": f"{from_state}={{{from_comp}}}",
-                                "Symbole": symbol,
-                                "Vers": f"{to_state}={{{to_comp}}}"
-                            })
-                
-                st.table(trans_table)
+                            row[symbol] = f"{to_state}={{{to_comp}}}"
+                        else:
+                            row[symbol] = ""
+                    rows.append(row)
+                    index_labels.append(f"{from_state}={{{from_comp}}}")
+
+                df = pd.DataFrame(rows, index=index_labels)
+                df.index.name = "Q \\ Σ"
+
+                st.table(df)
                 
                 # Comparison
                 st.subheader("Comparaison ε-NFA/AFD")
@@ -481,6 +578,69 @@ def main():
                     st.metric("Nombre d'états ε-NFA", len(nfa.states))
                 with col2:
                     st.metric("Nombre d'états AFD", len(dfa.states))
+                # Ajout du bouton de minimisation
+        if "dfa" in st.session_state:
+            if st.button("Minimiser l'AFD"):
+                minimized_dfa = st.session_state.dfa.minimize()
+                st.session_state.minimized_dfa = minimized_dfa
+                st.success("AFD minimisé avec succès!")
 
+                st.subheader("Visualisation de l'AFD minimisé")
+                visualize_automaton(minimized_dfa, "AFD Minimisé")
+
+                # Afficher table de transition du DFA minimisé
+                st.subheader("Table de transitions AFD Minimisé")
+               
+                rows = []
+                index_labels = []
+
+                for from_state, state in minimized_dfa.states.items():
+                    from_comp = ",".join(sorted(minimized_dfa.state_compositions[from_state]))
+                    row = {}
+                    for symbol in minimized_dfa.alphabet:
+                        if symbol in state.transitions:
+                            to_state = state.transitions[symbol]
+                            to_comp = ",".join(sorted(minimized_dfa.state_compositions[to_state]))
+                            row[symbol] = f"{to_state}={{{to_comp}}}"
+                        else:
+                            row[symbol] = ""
+                    rows.append(row)
+                    index_labels.append(f"{from_state}={{{from_comp}}}")
+
+                # Construction du DataFrame
+                df = pd.DataFrame(rows, index=index_labels)
+                df.index.name = "Q \\ Σ"
+
+                # Affichage
+                st.table(df)
+
+                st.subheader("Comparaison AFD / AFD Minimisé")
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.metric("États AFD", len(st.session_state.dfa.states))
+                with col2:
+                    st.metric("États AFD Minimisé", len(minimized_dfa.states))
+
+    with tab3:
+        st.header("Test de mots")
+        if 'nfa' not in st.session_state:
+            st.warning("Veuillez d'abord construire un ε-NFA dans la premiére onglet.")
+        if 'dfa' not in st.session_state:
+            st.warning("Veuillez d'abord construire un AFD dans l'onglet précédent.")
+        else:
+            dfa = st.session_state.dfa
+            
+            word = st.text_input("Entrez un mot à tester", "ab")
+            
+            if st.button("Tester le mot"):
+                if all(char in nfa.alphabet for char in word):
+                    accepted_nfa = nfa.accepts(word)
+                    dfa = nfa.to_dfa()
+                    accepted_dfa = dfa.accepts(word)
+
+                    st.write(f"**Automate NFA** : {'✅ Accepté' if accepted_nfa else '❌ Rejeté'}")
+                    st.write(f"**Automate DFA** : {'✅ Accepté' if accepted_dfa else '❌ Rejeté'}")
+                else:
+                    st.error(f"Le mot contient des symboles hors de l'alphabet : {nfa.alphabet}")
 if __name__ == "__main__":
     main()
